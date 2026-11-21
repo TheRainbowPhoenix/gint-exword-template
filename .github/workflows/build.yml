@@ -1,0 +1,91 @@
+name: Build (EX-word EXIT test)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/therainbowphoenix/gint-docker:main
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install EX-word fxSDK and D01 converter
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --branch fix/exword-data-load-alignment \
+            https://github.com/TheRainbowPhoenix/fxsdk-exword.git /tmp/fxsdk-src
+          cmake -S /tmp/fxsdk-src -B /tmp/fxsdk-build \
+            -DCMAKE_INSTALL_PREFIX=/tmp/fxsdk-exword \
+            -DFXLINK_DISABLE_SDL2=ON -DFXLINK_DISABLE_UDISKS2=ON
+          cmake --build /tmp/fxsdk-build --parallel 2
+          cmake --install /tmp/fxsdk-build
+          git clone --depth=1 https://github.com/brijohn/elf2d01.git /tmp/elf2d01
+          cc -O2 /tmp/elf2d01/elf2d01.c -o /tmp/fxsdk-exword/bin/elf2d01
+          echo /tmp/fxsdk-exword/bin >> "$GITHUB_PATH"
+
+      - name: Build gint for EX-word
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --branch exword \
+            https://github.com/TheRainbowPhoenix/gint-exword.git /tmp/gint-src
+          cmake -S /tmp/gint-src -B /tmp/gint-build \
+            -DCMAKE_TOOLCHAIN_FILE=/tmp/fxsdk-exword/lib/cmake/fxsdk/EXWORD.cmake \
+            -DCMAKE_INSTALL_PREFIX=/tmp/gint-exword \
+            -DCMAKE_MODULE_PATH=/tmp/fxsdk-exword/lib/cmake/fxsdk
+          cmake --build /tmp/gint-build --parallel 2
+          cmake --install /tmp/gint-build
+
+      - name: Build EXIT test and installation packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --branch main \
+            https://github.com/TheRainbowPhoenix/exword-xd-a8500-TEST.git /tmp/exword-metadata
+          cmake -S . -B build-exword \
+            -DCMAKE_TOOLCHAIN_FILE=/tmp/fxsdk-exword/lib/cmake/fxsdk/EXWORD.cmake \
+            -DCMAKE_PREFIX_PATH=/tmp/gint-exword \
+            '-DCMAKE_MODULE_PATH=/tmp/gint-exword/lib/cmake/fxsdk;/tmp/fxsdk-exword/lib/cmake/fxsdk' \
+            -DEXWORD_METADATA_SOURCE=/tmp/exword-metadata
+          cmake --build build-exword --parallel 2
+          test -s build-exword/ginttest.d01
+          test "$(stat -c %s build-exword/ginttest.d01)" -le 131072
+          for locale in ja cn; do
+            package="build-exword/packages/$locale/GINTT"
+            test -s "$package/ginttest.d01"
+            test -s "$package/diction.htm"
+            test -f "$package/fileinfo.cji"
+          done
+
+      - name: Upload Japanese install folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: gint-exword-template-ja
+          path: build-exword/packages/ja/
+          if-no-files-found: error
+
+      - name: Upload Chinese install folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: gint-exword-template-cn
+          path: build-exword/packages/cn/
+          if-no-files-found: error
+
+      - name: Upload ELF and map
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gint-exword-template-debug
+          path: |
+            build-exword/ginttest
+            build-exword/ginttest.map
+          if-no-files-found: warn
